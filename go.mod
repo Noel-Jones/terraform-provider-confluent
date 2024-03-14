@@ -8,9 +8,9 @@ require (
 	github.com/confluentinc/ccloud-sdk-go-v2/cmk v0.10.0
 	github.com/confluentinc/ccloud-sdk-go-v2/connect v0.2.0
 	github.com/confluentinc/ccloud-sdk-go-v2/data-catalog v0.2.0
+	github.com/confluentinc/ccloud-sdk-go-v2/flink v0.5.0
 	github.com/confluentinc/ccloud-sdk-go-v2/iam v0.10.0
 	github.com/confluentinc/ccloud-sdk-go-v2/identity-provider v0.2.0
-	github.com/confluentinc/ccloud-sdk-go-v2/flink v0.5.0
 	github.com/confluentinc/ccloud-sdk-go-v2/kafka-quotas v0.4.0
 	github.com/confluentinc/ccloud-sdk-go-v2/kafkarest v0.14.0
 	github.com/confluentinc/ccloud-sdk-go-v2/ksql v0.1.0
@@ -31,11 +31,16 @@ require (
 )
 
 require (
+	github.com/bahlo/generic-list-go v0.2.0 // indirect
+	github.com/buger/jsonparser v1.1.1 // indirect
 	github.com/cpuguy83/dockercfg v0.3.1 // indirect
 	github.com/imdario/mergo v0.3.15 // indirect
 	github.com/klauspost/compress v1.11.13 // indirect
+	github.com/mailru/easyjson v0.7.7 // indirect
 	github.com/moby/patternmatcher v0.5.0 // indirect
 	github.com/moby/sys/sequential v0.5.0 // indirect
+	github.com/wk8/go-ordered-map v1.0.0 // indirect
+	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
 
 require (
@@ -90,6 +95,7 @@ require (
 	github.com/vmihailenco/msgpack v4.0.4+incompatible // indirect
 	github.com/vmihailenco/msgpack/v4 v4.3.12 // indirect
 	github.com/vmihailenco/tagparser v0.1.1 // indirect
+	github.com/wk8/go-ordered-map/v2 v2.1.8
 	github.com/zclconf/go-cty v1.12.1
 	golang.org/x/crypto v0.0.0-20220517005047-85d78b3ac167 // indirect
 	golang.org/x/exp v0.0.0-20230510235704-dd950f8aeaea // indirect

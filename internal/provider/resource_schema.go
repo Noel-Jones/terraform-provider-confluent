@@ -155,6 +155,44 @@ func schemaResource() *schema.Resource {
 	}
 }
 
+/*
+// Implement the json.Marshaler interface
+type OrderedMap map[string]any
+
+	func (om OrderedMap) MarshalJSON() ([]byte, error) {
+		var buf bytes.Buffer
+
+		keys := make([]string, len(om))
+		i := 0
+		for k := range om {
+			keys[i] = k
+			i++
+		}
+		slices.Sort(keys)
+		buf.WriteString("{")
+		for o, k := range keys {
+			if o != 0 {
+				buf.WriteString(",")
+			}
+			// marshal key
+			key, err := json.Marshal(k)
+			if err != nil {
+				return nil, err
+			}
+			buf.Write(key)
+			buf.WriteString(":")
+			// marshal value
+			val, err := json.Marshal(om[k])
+			if err != nil {
+				return nil, err
+			}
+			buf.Write(val)
+		}
+
+		buf.WriteString("}")
+		return buf.Bytes(), nil
+	}
+*/
 func SetSchemaDiff(ctx context.Context, diff *schema.ResourceDiff, meta interface{}) error {
 	if !diff.HasChange(paramSchema) {
 		return nil
@@ -163,6 +201,70 @@ func SetSchemaDiff(ctx context.Context, diff *schema.ResourceDiff, meta interfac
 	oldObj, newObj := diff.GetChange(paramSchema)
 	oldSchema := oldObj.(string)
 	newSchema := newObj.(string)
+
+	if oldSchema == newSchema {
+		return nil
+	}
+
+	if oldSchema != "" && newSchema != "" {
+		// use the OrderedMap to Unmarshal from JSON object
+		oi := orderedmap.New[string, any]()
+		if err := json.Unmarshal([]byte(oldSchema), &oi); err != nil {
+			return fmt.Errorf("error unmarshaling old schema during comparison")
+		}
+		//sort.Slice(oi["fields"], func(i, j int) bool {
+		//	return oi["fields"].([]any)[i].(map[string]any)["name"].(string) < oi["fields"].([]any)[j].(map[string]any)["name"].(string)
+		//})
+
+		ni := orderedmap.New[string, any]()
+		if err := json.Unmarshal([]byte(newSchema), &ni); err != nil {
+			return fmt.Errorf("error unmarshaling new schema during comparison")
+		}
+		//sort.Slice(ni["fields"], func(i, j int) bool {
+		//	return ni["fields"].([]any)[i].(map[string]any)["name"].(string) < ni["fields"].([]any)[j].(map[string]any)["name"].(string)
+		//})
+
+		var t = 0
+		// Reorder the new schema so the fields match the old
+		for o := 0; o < len(oi["fields"].([]any)); o++ {
+			// For each of the fields in the old schema, find the field in the new schema
+			for n := 0; n < len(ni["fields"].([]any)); n++ {
+				if oi["fields"].([]any)[o].(map[string]any)["name"].(string) == ni["fields"].([]any)[n].(map[string]any)["name"].(string) {
+					// If the field is not at the top of the unsorted part then make it so by swapping them
+					if o != t {
+						var tmp = ni["fields"].([]any)[n]
+						ni["fields"].([]any)[n] = ni["fields"].([]any)[t]
+						ni["fields"].([]any)[t] = tmp
+					}
+					// Move the top marker
+					t++
+				}
+			}
+		}
+
+		// Recreate the json with the new order
+		//		var nsr MapWithOrder
+		//		nsr.data = ni
+		//		nsr.order = []string{"type", "name", "namespace", "fields"}
+		newSchemaReordered, err := json.Marshal(ni)
+		if err != nil {
+			return fmt.Errorf("error marshaling reordered schema during comparison")
+		}
+
+		// A little bit of logging
+		if string(newSchemaReordered) == oldSchema {
+			tflog.Info(ctx, "Old matches New schema reordered")
+		} else {
+			tflog.Info(ctx, fmt.Sprintf("\nOld: %s\nNew: %s\n", oldSchema, newSchemaReordered))
+		}
+
+		// Now update the new schema for improved diff and matching
+		if err := diff.SetNew(paramSchema, string(newSchemaReordered)); err != nil {
+			return fmt.Errorf("error allowing for reordering during comparison")
+		}
+		return nil
+
+	}
 
 	client := meta.(*Client)
 
@@ -228,24 +330,21 @@ func schemaLookupCheck(ctx context.Context, diff *schema.ResourceDiff, c *Schema
 
 	tflog.Debug(ctx, fmt.Sprintf("Customizing diff new Schema: %s", createSchemaRequestJson))
 
-	registeredSchema, schemaExists, err := schemaLookup(ctx, c, createSchemaRequest, subjectName)
+	schemaIdentifier := diff.Get(paramSchemaIdentifier).(int)
+	registeredSchema, err := schemaLookup(ctx, c, createSchemaRequest, subjectName, schemaIdentifier)
 	if err != nil {
 		return fmt.Errorf("error customizing diff Schema: %s", createDescriptiveError(err))
 	}
-	if !schemaExists {
-		return nil
-	}
-
-	schemaIdentifier := diff.Get(paramSchemaIdentifier).(int)
-	if int(registeredSchema.GetId()) == schemaIdentifier {
-		// Two schemas that are semantically equivalent
-		// https://docs.confluent.io/platform/current/schema-registry/serdes-develop/index.html#schema-normalization
-
-		// Set old value to paramSchema to avoid TF drift
+	if registeredSchema != nil {
+		// The existing schema is equivalent to the new one. Set old value to paramSchema to avoid unecessary change or TF drift.
+		// Note that we will not have matched some cases, particularly if a non normalized schema was written to the registry
+		// and we are comparing against a semantically equivalent non normalized schema with array entries in a different order.
+		// By the way, the old Schema and the registered schema will in fact be the same provided it refreshed correctly.
 		if err := diff.SetNew(paramSchema, oldSchema); err != nil {
 			return fmt.Errorf("error customizing diff Schema: %s", createDescriptiveError(err))
 		}
 	}
+
 	return nil
 }
 
@@ -269,25 +368,32 @@ func schemaValidateCheck(ctx context.Context, c *SchemaRegistryRestClient, creat
 	return nil
 }
 
-func schemaLookup(ctx context.Context, c *SchemaRegistryRestClient, createSchemaRequest *sr.RegisterSchemaRequest, subjectName string) (*sr.Schema, bool, error) {
+func schemaLookup(ctx context.Context, c *SchemaRegistryRestClient, createSchemaRequest *sr.RegisterSchemaRequest, subjectName string, schemaIdentifier int) (*sr.Schema, error) {
 	// https://github.com/confluentinc/terraform-provider-confluent/issues/196#issuecomment-1426437871
 	// Try both normalize=false and normalize=true
-	nonNormalizedSchema, schemaExists, err := schemaLookupByNormalize(ctx, c, createSchemaRequest, subjectName, false)
+
+	nonNormalizedSchema, nonNormalizedSchemaExists, err := schemaLookupByNormalize(ctx, c, createSchemaRequest, subjectName, false)
 	if err != nil {
-		return nil, false, fmt.Errorf("error looking up Schema: %s", createDescriptiveError(err))
+		return nil, fmt.Errorf("error looking up Schema: %s", createDescriptiveError(err))
 	}
-	if schemaExists {
-		return nonNormalizedSchema, schemaExists, nil
+	if nonNormalizedSchemaExists && int(nonNormalizedSchema.GetId()) == schemaIdentifier {
+		tflog.Debug(ctx, fmt.Sprintf("Lookup found non normalized schema with matching id: %d", schemaIdentifier))
+		return nonNormalizedSchema, nil
 	}
-	normalizedSchema, schemaExists, err := schemaLookupByNormalize(ctx, c, createSchemaRequest, subjectName, true)
+
+	normalizedSchema, normalizedSchemaExists, err := schemaLookupByNormalize(ctx, c, createSchemaRequest, subjectName, true)
 	if err != nil {
-		return nil, false, fmt.Errorf("error looking up Schema: %s", createDescriptiveError(err))
+		return nil, fmt.Errorf("error looking up Schema: %s", createDescriptiveError(err))
 	}
-	if schemaExists {
-		return normalizedSchema, schemaExists, nil
+	if normalizedSchemaExists && int(normalizedSchema.GetId()) == schemaIdentifier {
+		tflog.Debug(ctx, fmt.Sprintf("Lookup found normalized schema with matching id: %d", schemaIdentifier))
+		return normalizedSchema, nil
 	}
-	// Requested schema doesn't exist
-	return nil, false, nil
+
+	// Requested schema is not the latest version, either, normalized or non normalized. Note, the stored schema may not be normalized and
+	// (if not normalized) may not have the same order in lists, so we still may not find it, even though semantically equivalent.
+	// We really need an API to be able to do semantic comparison.
+	return nil, nil
 }
 
 func schemaLookupByNormalize(ctx context.Context, c *SchemaRegistryRestClient, createSchemaRequest *sr.RegisterSchemaRequest, subjectName string, shouldNormalize bool) (*sr.Schema, bool, error) {
